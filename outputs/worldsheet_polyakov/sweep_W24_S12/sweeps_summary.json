@@ -1,0 +1,27 @@
+{
+  "run_id": "sweep_W24_S12",
+  "results": [
+    {
+      "W_tau": 24,
+      "stride_s_tau": 12,
+      "epsilon": 1e-08,
+      "knn_k": 7,
+      "N_windows": 20,
+      "macro_def": "|K|>0.0001",
+      "n_macro": 19,
+      "macro_frac": 0.1,
+      "fit_all": {
+        "n": 190,
+        "slope": 0.39796093161533075,
+        "intercept": 10.175679824049716,
+        "r2": 0.40141124931797945
+      },
+      "fit_macro_q20_q80": {
+        "n": 19,
+        "slope": 1.0000000000000002,
+        "intercept": 2.4899972095866116e-15,
+        "r2": 1.0
+      }
+    }
+  ]
+}

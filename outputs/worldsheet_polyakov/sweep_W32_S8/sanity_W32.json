@@ -1,0 +1,19 @@
+{
+  "windows": {
+    "Nt": 256,
+    "W_tau": 32,
+    "stride": 8,
+    "n_windows": 29,
+    "max_overlap": 24
+  },
+  "K": {
+    "K_shape": [
+      29,
+      29
+    ],
+    "offdiag_max": 0.12737420272287941,
+    "offdiag_std": 0.01869528913218646
+  },
+  "reused_K": false,
+  "n_samples_used": 20
+}

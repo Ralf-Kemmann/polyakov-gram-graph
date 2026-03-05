@@ -1,0 +1,43 @@
+# code/worldsheet_polyakov/sanity_checks.py
+from __future__ import annotations
+import numpy as np
+
+def window_starts(Nt: int, W_tau: int, stride: int) -> np.ndarray:
+    return np.arange(0, Nt - W_tau + 1, stride, dtype=int)
+
+def max_overlap(starts: np.ndarray, W_tau: int) -> int:
+    if len(starts) < 2:
+        return 0
+    ds = np.abs(starts[:, None] - starts[None, :])
+    ov = np.maximum(0, W_tau - ds)
+    ov = ov[~np.eye(len(starts), dtype=bool)]
+    return int(np.max(ov)) if ov.size else 0
+
+def preflight_windows(*, Nt: int, W_tau: int, stride: int, strict: bool = True) -> dict:
+    starts = window_starts(Nt, W_tau, stride)
+    m = max_overlap(starts, W_tau)
+    info = {
+        "Nt": int(Nt),
+        "W_tau": int(W_tau),
+        "stride": int(stride),
+        "n_windows": int(len(starts)),
+        "max_overlap": int(m),
+    }
+    if strict and len(starts) > 1 and m == 0:
+        raise RuntimeError(
+            f"[sanity] DEGENERATE windows: max_overlap=0 (W_tau={W_tau}, stride={stride})."
+        )
+    return info
+
+def post_k(K: np.ndarray, strict: bool = True) -> dict:
+    N = int(K.shape[0])
+    off = K[~np.eye(N, dtype=bool)]
+    offabs = np.abs(off)
+    info = {
+        "K_shape": [N, N],
+        "offdiag_max": float(np.max(offabs)) if offabs.size else 0.0,
+        "offdiag_std": float(np.std(offabs)) if offabs.size else 0.0,
+    }
+    if strict and (info["offdiag_max"] == 0.0 or info["offdiag_std"] == 0.0):
+        raise RuntimeError("[sanity] DEGENERATE K: offdiag has zero signal (all equal / all zero).")
+    return info

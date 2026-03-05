@@ -1,0 +1,24 @@
+{
+  "run_id": "control_shuffle_edges",
+  "results": [
+    {
+      "W_tau": 24,
+      "stride_s_tau": 8,
+      "epsilon": 1e-08,
+      "knn_k": 7,
+      "N_windows": 30,
+      "macro_def": "|K|>0.0001",
+      "n_macro": 57,
+      "macro_frac": 0.1310344827586207,
+      "fit_macro_q20_q80": {
+        "r2": 0.3336596505117462
+      },
+      "fit_all": {
+        "r2": 0.30597711669116745
+      },
+      "control": "shuffle_offdiag_y",
+      "seed": 0,
+      "note": "Off-diagonal y_ij values shuffled symmetrically before graph distances; should destroy macro structure."
+    }
+  ]
+}

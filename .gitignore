@@ -1,0 +1,80 @@
+# =========================
+# Python / venv / caches
+# =========================
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# =========================
+# OS / editor noise
+# =========================
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# =========================
+# Logs / temporary files
+# =========================
+*.log
+*.tmp
+*.temp
+
+# =========================
+# LaTeX build artifacts
+# =========================
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.out
+*.toc
+*.lof
+*.lot
+*.synctex.gz
+
+# =========================
+# Project outputs
+# =========================
+outputs/**/*.npy
+outputs/**/*.npz
+outputs/**/samples.npy
+outputs/**/samples*.npy
+
+# =========================
+# Keep reproducibility artifacts
+# =========================
+!outputs/**/params.json
+!outputs/**/sweeps_summary.json
+!outputs/**/sanity_*.json
+!outputs/**/dph_plot*.png
+!outputs/**/kmin_sensitivity*.png
+
+# Keep manuscript figures
+!figures/**/*.png
+!figures/**/*.pdf
+
+# =========================
+# Archives / exports
+# =========================
+*.zip
+*.tar
+*.tar.gz
+*.7z

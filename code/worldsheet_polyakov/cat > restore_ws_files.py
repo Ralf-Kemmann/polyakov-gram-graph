@@ -1,0 +1,600 @@
+cat > restore_ws_files.py <<'PY'
+from __future__ import annotations
+import os, shutil
+from datetime import datetime
+from pathlib import Path
+
+ROOT = Path(".")
+DST = ROOT / "code" / "worldsheet_polyakov"
+DST.mkdir(parents=True, exist_ok=True)
+
+bak = DST / "_bak"
+bak.mkdir(exist_ok=True)
+
+def backup_if_exists(p: Path):
+    if p.exists():
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        shutil.copy2(p, bak / f"{p.name}.{ts}")
+
+# --- file contents (drop-in) ---
+
+SANITY_CHECKS = r'''from __future__ import annotations
+import numpy as np
+
+def window_starts(Nt: int, W_tau: int, stride: int) -> np.ndarray:
+    if W_tau > Nt:
+        return np.array([], dtype=int)
+    return np.arange(0, Nt - W_tau + 1, stride, dtype=int)
+
+def max_overlap(starts: np.ndarray, W_tau: int) -> int:
+    if len(starts) < 2:
+        return 0
+    ds = np.abs(starts[:, None] - starts[None, :])
+    ov = np.maximum(0, W_tau - ds)
+    ov = ov[~np.eye(len(starts), dtype=bool)]
+    return int(np.max(ov)) if ov.size else 0
+
+def preflight_windows(*, Nt: int, W_tau: int, stride: int, strict: bool = True) -> dict:
+    starts = window_starts(Nt, W_tau, stride)
+    m = max_overlap(starts, W_tau)
+    info = {
+        "Nt": int(Nt),
+        "W_tau": int(W_tau),
+        "stride": int(stride),
+        "n_windows": int(len(starts)),
+        "max_overlap": int(m),
+    }
+    if strict and len(starts) > 1 and m == 0:
+        raise RuntimeError(
+            f"[sanity] DEGENERATE windows: max_overlap=0 (W_tau={W_tau}, stride={stride}). "
+            f"Fix: choose stride < W_tau."
+        )
+    return info
+
+def post_k(K: np.ndarray, strict: bool = True) -> dict:
+    N = int(K.shape[0])
+    off = K[~np.eye(N, dtype=bool)]
+    offabs = np.abs(off)
+    info = {
+        "K_shape": [N, N],
+        "offdiag_max": float(np.max(offabs)) if offabs.size else 0.0,
+        "offdiag_std": float(np.std(offabs)) if offabs.size else 0.0,
+    }
+    if strict and (info["offdiag_max"] == 0.0 or info["offdiag_std"] == 0.0):
+        raise RuntimeError(
+            "[sanity] DEGENERATE K: offdiag has zero signal (all equal / all zero). "
+            "Likely cause: no overlap (stride >= W_tau) or norms are zero."
+        )
+    return info
+'''
+
+POLYAKOV_LATTICE = r'''"""
+polyakov_lattice.py
+-------------------
+Lattice Polyakov (Euclidean, conformal gauge) baseline sampler.
+
+NEW (streaming):
+- langevin_iter(...) yields samples one-by-one, so pipelines can avoid a huge samples array in RAM.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional, Iterator
+import numpy as np
+
+
+@dataclass
+class GridSpec:
+    N_sigma: int
+    N_tau: int
+    delta_sigma: float = 1.0
+    delta_tau: float = 1.0
+    sigma_periodic: bool = True
+    tau_periodic: bool = False
+
+
+def _laplacian_2d(X: np.ndarray, grid: GridSpec) -> np.ndarray:
+    D, Ns, Nt = X.shape
+    ds2 = grid.delta_sigma ** 2
+    dt2 = grid.delta_tau ** 2
+
+    if grid.sigma_periodic:
+        X_sp = np.roll(X, shift=-1, axis=1)
+        X_sm = np.roll(X, shift=+1, axis=1)
+    else:
+        X_sp = X.copy()
+        X_sm = X.copy()
+        X_sp[:, :-1, :] = X[:, 1:, :]
+        X_sp[:, -1, :] = X[:, -1, :]
+        X_sm[:, 1:, :] = X[:, :-1, :]
+        X_sm[:, 0, :] = X[:, 0, :]
+
+    if grid.tau_periodic:
+        X_tp = np.roll(X, shift=-1, axis=2)
+        X_tm = np.roll(X, shift=+1, axis=2)
+    else:
+        X_tp = X.copy()
+        X_tm = X.copy()
+        X_tp[:, :, :-1] = X[:, :, 1:]
+        X_tp[:, :, -1] = X[:, :, -1]
+        X_tm[:, :, 1:] = X[:, :, :-1]
+        X_tm[:, :, 0] = X[:, :, 0]
+
+    return (X_sp - 2.0 * X + X_sm) / ds2 + (X_tp - 2.0 * X + X_tm) / dt2
+
+
+def langevin_iter(
+    grid: GridSpec,
+    D: int,
+    T: float,
+    eta: float,
+    n_steps_total: int,
+    burn_in_steps: int,
+    sample_every: int,
+    n_saved_samples: int,
+    rng_seed: int = 0,
+    zero_mode_handling: str = "global_mean_subtract_each_step",
+    noise_scale: float = 1.0,
+    x0: Optional[np.ndarray] = None,
+) -> Iterator[np.ndarray]:
+    rng = np.random.default_rng(rng_seed)
+    Ns, Nt = grid.N_sigma, grid.N_tau
+    if x0 is None:
+        X = rng.normal(0.0, 0.1, size=(D, Ns, Nt)).astype(np.float64)
+    else:
+        X = np.array(x0, dtype=np.float64, copy=True)
+        assert X.shape == (D, Ns, Nt)
+
+    vol = grid.delta_sigma * grid.delta_tau
+    saved = 0
+
+    for step in range(n_steps_total):
+        lap = _laplacian_2d(X, grid)
+        drift = (T * vol) * lap
+        noise = rng.normal(0.0, 1.0, size=X.shape) * noise_scale
+        X = X + eta * drift + np.sqrt(2.0 * eta) * noise
+
+        if zero_mode_handling == "global_mean_subtract_each_step":
+            X = X - X.mean(axis=(1, 2), keepdims=True)
+        elif zero_mode_handling in ("none", None, ""):
+            pass
+        else:
+            raise ValueError(f"Unknown zero_mode_handling: {zero_mode_handling}")
+
+        if step >= burn_in_steps and ((step - burn_in_steps) % sample_every == 0):
+            yield X.copy()
+            saved += 1
+            if saved >= n_saved_samples:
+                break
+
+    if saved < n_saved_samples:
+        raise RuntimeError(
+            f"Not enough samples saved. Wanted {n_saved_samples}, got {saved}. "
+            f"Increase n_steps_total or decrease n_saved_samples."
+        )
+
+
+def langevin_sample(
+    grid: GridSpec,
+    D: int,
+    T: float,
+    eta: float,
+    n_steps_total: int,
+    burn_in_steps: int,
+    sample_every: int,
+    n_saved_samples: int,
+    rng_seed: int = 0,
+    zero_mode_handling: str = "global_mean_subtract_each_step",
+    noise_scale: float = 1.0,
+    x0: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    saved = list(
+        langevin_iter(
+            grid=grid, D=D, T=T, eta=eta,
+            n_steps_total=n_steps_total,
+            burn_in_steps=burn_in_steps,
+            sample_every=sample_every,
+            n_saved_samples=n_saved_samples,
+            rng_seed=rng_seed,
+            zero_mode_handling=zero_mode_handling,
+            noise_scale=noise_scale,
+            x0=x0,
+        )
+    )
+    return np.stack(saved, axis=0)
+'''
+
+COMPUTE_K_DPH = r'''"""
+compute_K_dph.py
+----------------
+End-to-end baseline pipeline (RAM-safe):
+Polyakov lattice sampling -> τ-window states -> fair K -> distances -> kNN -> shortest paths -> DPH plot + sweep summary.
+
+Adds:
+- streaming sampling (no samples array in RAM)
+- streaming K accumulation across samples
+- sanity guards: overlap preflight + K signal check (STOP instead of silent NaNs)
+"""
+
+from __future__ import annotations
+
+import os
+import json
+import math
+import hashlib
+from typing import Dict, Any, Tuple, List
+
+import numpy as np
+import matplotlib.pyplot as plt
+from heapq import heappush, heappop
+
+from polyakov_lattice import GridSpec, langevin_iter, langevin_sample
+from build_states import window_starts, extract_window, weights, inner_product_fair
+from sanity_checks import preflight_windows, post_k
+
+
+def _sha1_of_file(path: str) -> str:
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1 << 20)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _ensure_dir(p: str) -> None:
+    os.makedirs(p, exist_ok=True)
+
+
+def compute_K_fair(
+    X: np.ndarray,
+    W_tau: int,
+    stride: int,
+    delta_sigma: float,
+    delta_tau: float,
+    weights_type: str = "flat",
+) -> Tuple[np.ndarray, np.ndarray]:
+    D, Ns, Nt = X.shape
+    starts = window_starts(Nt, W_tau, stride)
+    Nw = len(starts)
+    if Nw == 0:
+        raise ValueError("No windows available. Check W_tau, stride, N_tau.")
+
+    w = weights(W_tau, Ns, kind=weights_type)
+    patches = [extract_window(X, int(b0), W_tau) for b0 in starts]
+    K = np.zeros((Nw, Nw), dtype=np.float64)
+
+    for i in range(Nw):
+        Xi = patches[i]
+        bi = int(starts[i])
+        for j in range(i, Nw):
+            Xj = patches[j]
+            bj = int(starts[j])
+            delta = bj - bi
+            ip, ni, nj = inner_product_fair(
+                Xi, Xj, w, delta_sigma=delta_sigma, delta_tau=delta_tau, delta=delta
+            )
+            K[i, j] = ip / (ni * nj) if (ni > 0.0 and nj > 0.0) else 0.0
+            K[j, i] = K[i, j]
+    return K, starts
+
+
+def knn_graph_from_dist(d: np.ndarray, k: int, symmetrize: bool = True) -> List[List[Tuple[int, float]]]:
+    N = d.shape[0]
+    k = int(min(max(k, 1), max(N - 1, 1)))  # clamp
+    adj = [[] for _ in range(N)]
+    for i in range(N):
+        idx = np.argsort(d[i])
+        neighbors = [j for j in idx if j != i][:k]
+        for j in neighbors:
+            w = float(d[i, j])
+            if math.isfinite(w):
+                adj[i].append((j, w))
+
+    if symmetrize:
+        adj2 = [dict() for _ in range(N)]
+        for i in range(N):
+            for j, w in adj[i]:
+                prev = adj2[i].get(j, float("inf"))
+                if w < prev:
+                    adj2[i][j] = w
+                prev2 = adj2[j].get(i, float("inf"))
+                if w < prev2:
+                    adj2[j][i] = w
+        return [[(j, w) for j, w in adj2[i].items()] for i in range(N)]
+    return adj
+
+
+def dijkstra_all_pairs(adj: List[List[Tuple[int, float]]]) -> np.ndarray:
+    N = len(adj)
+    Dmat = np.full((N, N), np.inf, dtype=np.float64)
+    for src in range(N):
+        dist = np.full(N, np.inf, dtype=np.float64)
+        dist[src] = 0.0
+        pq = [(0.0, src)]
+        while pq:
+            dcur, u = heappop(pq)
+            if dcur != dist[u]:
+                continue
+            for v, w in adj[u]:
+                nd = dcur + w
+                if nd < dist[v]:
+                    dist[v] = nd
+                    heappush(pq, (nd, v))
+        Dmat[src] = dist
+    return Dmat
+
+
+def linear_fit_metrics(x: np.ndarray, y: np.ndarray) -> Dict[str, float]:
+    m = np.isfinite(x) & np.isfinite(y)
+    x = x[m]
+    y = y[m]
+    n = int(x.size)
+    if n < 3 or float(np.var(x)) == 0.0 or float(np.var(y)) == 0.0:
+        return {"n": n, "slope": float("nan"), "intercept": float("nan"), "r2": float("nan")}
+    X = np.vstack([x, np.ones_like(x)]).T
+    coef, *_ = np.linalg.lstsq(X, y, rcond=None)
+    slope, intercept = float(coef[0]), float(coef[1])
+    yhat = slope * x + intercept
+    ss_res = float(np.sum((y - yhat) ** 2))
+    ss_tot = float(np.sum((y - float(np.mean(y))) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+    return {"n": n, "slope": slope, "intercept": intercept, "r2": r2}
+
+
+def macro_window_slice(x: np.ndarray, q_lo: float = 0.2, q_hi: float = 0.8) -> np.ndarray:
+    m = np.isfinite(x)
+    xf = x[m]
+    if xf.size < 10:
+        return m
+    lo = float(np.quantile(xf, q_lo))
+    hi = float(np.quantile(xf, q_hi))
+    return m & (x >= lo) & (x <= hi)
+
+
+def main(params_json_path: str) -> None:
+    with open(params_json_path, "r", encoding="utf-8") as f:
+        P = json.load(f)
+
+    run_dir = os.path.dirname(params_json_path)
+    _ensure_dir(run_dir)
+
+    D = int(P["target_dim_D"])
+    T = float(P["tension_T"])
+    gridP = P["grid"]
+    Ns = int(gridP["N_sigma"])
+    Nt = int(gridP["N_tau"])
+    ds = float(gridP["delta_sigma"])
+    dt = float(gridP["delta_tau"])
+    bc = gridP["bc"]
+    grid = GridSpec(
+        N_sigma=Ns, N_tau=Nt,
+        delta_sigma=ds, delta_tau=dt,
+        sigma_periodic=bool(bc["sigma_periodic"]),
+        tau_periodic=bool(bc["tau_periodic"]),
+    )
+
+    samp = P["sampling"]
+    eta = float(samp["step_size_eta"])
+    n_steps_total = int(samp["n_steps_total"])
+    burn_in = int(samp["burn_in_steps"])
+    sample_every = int(samp["sample_every"])
+    n_saved = int(samp["n_saved_samples"])
+    rng_seed = int(samp["rng_seed"])
+    zm = samp.get("zero_mode_handling", "global_mean_subtract_each_step")
+    noise_scale = float(samp.get("noise", {}).get("scale", 1.0))
+
+    prag = P.get("pragmatics", {})
+    max_samples_for_K = int(prag.get("max_samples_for_K", n_saved))
+    save_samples = bool(prag.get("save_samples_npy", False))
+    stream_samples = bool(prag.get("stream_samples", True))
+    strict_sanity = bool(prag.get("strict_sanity", True))
+
+    statesP = P["states"]
+    stride = int(statesP["stride_s_tau"])
+    W_sweep = list(statesP["W_tau_sweep"])
+    weights_type = statesP.get("weights", {}).get("type", "flat")
+
+    Kp = P["kernel_K"]
+    store_abs = bool(Kp.get("store_abs", True))
+    eps_sweep = list(Kp["epsilon_sweep"])
+
+    graphP = P["distance_graph"]
+    ell0 = float(graphP["ell0"])
+    k_sweep = list(graphP["knn_k_sweep"])
+    symm = bool(graphP.get("symmetrize", True))
+
+    plot_file = P["dph"]["outputs"]["plot_file"]
+    summary_file = P["dph"]["outputs"]["summary_file"]
+
+    n_saved_effective = min(n_saved, max_samples_for_K)
+    print(f"[run] sampling Langevin: Ns={Ns} Nt={Nt} D={D} n_saved={n_saved_effective} (requested {n_saved}, cap {max_samples_for_K})")
+
+    # Preflight: stop early if stride >= W_tau (no overlap)
+    sanity_windows: Dict[str, Any] = {}
+    starts_by_W: Dict[int, np.ndarray] = {}
+    for W_tau in W_sweep:
+        W = int(W_tau)
+        sanity_windows[str(W)] = preflight_windows(Nt=Nt, W_tau=W, stride=stride, strict=strict_sanity)
+        starts_by_W[W] = window_starts(Nt, W, stride)
+
+    # Streaming K accumulation
+    K_sum: Dict[int, np.ndarray] = {}
+    starts_ref: Dict[int, np.ndarray] = {}
+    for W_tau in W_sweep:
+        W = int(W_tau)
+        Nw = int(len(starts_by_W[W]))
+        K_sum[W] = np.zeros((Nw, Nw), dtype=np.float64)
+        starts_ref[W] = starts_by_W[W]
+
+    if save_samples and stream_samples:
+        print("[run] warning: save_samples_npy ignored in stream mode (set pragmatics.stream_samples=false to save)")
+
+    m_count = 0
+    if stream_samples:
+        for X in langevin_iter(
+            grid=grid, D=D, T=T, eta=eta,
+            n_steps_total=n_steps_total,
+            burn_in_steps=burn_in,
+            sample_every=sample_every,
+            n_saved_samples=n_saved_effective,
+            rng_seed=rng_seed,
+            zero_mode_handling=zm,
+            noise_scale=noise_scale,
+        ):
+            for W_tau in W_sweep:
+                W = int(W_tau)
+                K, starts = compute_K_fair(X, W_tau=W, stride=stride, delta_sigma=ds, delta_tau=dt, weights_type=weights_type)
+                if not np.array_equal(starts_ref[W], starts):
+                    raise RuntimeError("[run] Window starts mismatch across samples.")
+                K_sum[W] += K
+            m_count += 1
+    else:
+        samples = langevin_sample(
+            grid=grid, D=D, T=T, eta=eta,
+            n_steps_total=n_steps_total,
+            burn_in_steps=burn_in,
+            sample_every=sample_every,
+            n_saved_samples=n_saved_effective,
+            rng_seed=rng_seed,
+            zero_mode_handling=zm,
+            noise_scale=noise_scale,
+        )
+        if save_samples:
+            np.save(os.path.join(run_dir, "samples.npy"), samples)
+        for mi in range(samples.shape[0]):
+            X = samples[mi]
+            for W_tau in W_sweep:
+                W = int(W_tau)
+                K, starts = compute_K_fair(X, W_tau=W, stride=stride, delta_sigma=ds, delta_tau=dt, weights_type=weights_type)
+                if not np.array_equal(starts_ref[W], starts):
+                    raise RuntimeError("[run] Window starts mismatch across samples.")
+                K_sum[W] += K
+            m_count += 1
+
+    if m_count != n_saved_effective:
+        raise RuntimeError(f"[run] internal: expected {n_saved_effective} samples, got {m_count}")
+
+    sweep_results: Dict[str, Any] = {"run_id": P.get("run_id", "run"), "results": []}
+
+    nW = len(W_sweep)
+    fig, axes = plt.subplots(nW, 1, figsize=(8, 3.2 * nW))
+    if nW == 1:
+        axes = [axes]
+
+    for wi, W_tau in enumerate(W_sweep):
+        W = int(W_tau)
+        print(f"[run] computing K for W_tau={W} ...")
+
+        K_mean = K_sum[W] / max(m_count, 1)
+        K_abs_mean = np.abs(K_mean) if store_abs else K_mean.copy()
+
+        # Post-K sanity: stop if offdiag is identically zero
+        sanity_k = post_k(K_mean, strict=strict_sanity)
+        with open(os.path.join(run_dir, f"sanity_W{W}.json"), "w", encoding="utf-8") as f:
+            json.dump({"windows": sanity_windows[str(W)], "K": sanity_k, "n_samples_used": int(m_count)}, f, indent=2)
+
+        np.save(os.path.join(run_dir, f"K_W{W}.npy"), K_mean)
+        if store_abs:
+            np.save(os.path.join(run_dir, f"K_abs_W{W}.npy"), K_abs_mean)
+
+        Nw = K_mean.shape[0]
+        rep_xy = None
+
+        for eps in eps_sweep:
+            eps = float(eps)
+            y_full = -np.log(np.abs(K_mean) + eps)
+            d_full = ell0 * y_full
+            np.fill_diagonal(d_full, 0.0)
+
+            for k in k_sweep:
+                k_eff = min(int(k), max(Nw - 1, 1))
+                if k_eff < 1:
+                    continue
+                adj = knn_graph_from_dist(d_full, k=k_eff, symmetrize=symm)
+                Dmat = dijkstra_all_pairs(adj)
+                x_full = Dmat / max(ell0, 1e-12)
+
+                iu, ju = np.triu_indices(Nw, k=1)
+                x = x_full[iu, ju]
+                y = y_full[iu, ju]
+
+                m_macro = macro_window_slice(x, 0.2, 0.8)
+                metrics_all = linear_fit_metrics(x, y)
+                metrics_macro = linear_fit_metrics(x[m_macro], y[m_macro])
+
+                sweep_results["results"].append({
+                    "W_tau": W,
+                    "stride_s_tau": stride,
+                    "epsilon": eps,
+                    "knn_k": int(k_eff),
+                    "N_windows": int(Nw),
+                    "fit_all": metrics_all,
+                    "fit_macro_q20_q80": metrics_macro
+                })
+
+                if rep_xy is None:
+                    rep_xy = (x, y, eps, k_eff, m_macro)
+                else:
+                    eps_mid = float(eps_sweep[len(eps_sweep)//2])
+                    k_mid = int(k_sweep[len(k_sweep)//2])
+                    if math.isclose(eps, eps_mid) and k_eff == min(k_mid, max(Nw - 1, 1)):
+                        rep_xy = (x, y, eps, k_eff, m_macro)
+
+        ax = axes[wi]
+        if rep_xy is not None:
+            x, y, eps_rep, k_rep, m_macro = rep_xy
+            ax.scatter(x, y, s=6, alpha=0.5)
+            mm = np.isfinite(x) & np.isfinite(y) & m_macro
+            if int(np.sum(mm)) >= 3:
+                met = linear_fit_metrics(x[mm], y[mm])
+                xs = np.linspace(float(np.nanmin(x[mm])), float(np.nanmax(x[mm])), 50)
+                ys = met["slope"] * xs + met["intercept"]
+                ax.plot(xs, ys, linewidth=2)
+                ax.set_title(f"W_tau={W} (rep: eps={eps_rep:g}, k={k_rep})  macro R^2={met['r2']:.3f}")
+            else:
+                ax.set_title(f"W_tau={W} (rep: eps={eps_rep:g}, k={k_rep})  macro R^2=nan (degenerate)")
+        else:
+            ax.set_title(f"W_tau={W} (no data)")
+        ax.set_xlabel("x = D(i,j)/ell0")
+        ax.set_ylabel("y = -log(|K_ij|+eps)")
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(run_dir, plot_file), dpi=160)
+    plt.close(fig)
+
+    with open(os.path.join(run_dir, summary_file), "w", encoding="utf-8") as f:
+        json.dump(sweep_results, f, indent=2)
+
+    print(f"[done] outputs in: {run_dir}")
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) != 2:
+        raise SystemExit("Usage: python compute_K_dph.py outputs/worldsheet_polyakov/run0001/params.json")
+    main(sys.argv[1])
+'''
+
+# --- write files (with backups) ---
+files = {
+    "sanity_checks.py": SANITY_CHECKS,
+    "polyakov_lattice.py": POLYAKOV_LATTICE,
+    "compute_K_dph.py": COMPUTE_K_DPH,
+}
+
+for name, content in files.items():
+    dst = DST / name
+    backup_if_exists(dst)
+    dst.write_text(content, encoding="utf-8")
+    print("[write]", dst)
+
+print("\nNext:")
+print("  python3 -m py_compile code/worldsheet_polyakov/compute_K_dph.py")
+print("  python3 -m py_compile code/worldsheet_polyakov/polyakov_lattice.py")
+PY
+
+python3 restore_ws_files.py

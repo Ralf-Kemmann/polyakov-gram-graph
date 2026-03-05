@@ -1,0 +1,24 @@
+{
+  "run_id": "run0001",
+  "results": [
+    {
+      "W_tau": 24,
+      "stride_s_tau": 32,
+      "epsilon": 1e-08,
+      "knn_k": 12,
+      "N_windows": 8,
+      "fit_all": {
+        "n": 28,
+        "slope": 0.9970616018632414,
+        "intercept": 0.05412729397585284,
+        "r2": NaN
+      },
+      "fit_macro_q20_q80": {
+        "n": 28,
+        "slope": 0.9970616018632414,
+        "intercept": 0.05412729397585284,
+        "r2": NaN
+      }
+    }
+  ]
+}

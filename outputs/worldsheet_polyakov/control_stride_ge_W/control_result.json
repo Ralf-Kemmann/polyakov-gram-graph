@@ -1,0 +1,10 @@
+{
+  "control": "stride_ge_W_abort",
+  "expected": "abort",
+  "returncode": 1,
+  "W_tau": 24,
+  "stride": 32,
+  "ok": true,
+  "note": "Strict sanity preflight should abort when max_overlap=0 (degenerate windows).",
+  "log_tail": "Traceback (most recent call last):\n  File \"/home/ralf-kemmann/Downloads/worldsheet_polyakov_skeleton/code/worldsheet_polyakov/compute_K_dph.py\", line 438, in <module>\n    main(sys.argv[1])\n  File \"/home/ralf-kemmann/Downloads/worldsheet_polyakov_skeleton/code/worldsheet_polyakov/compute_K_dph.py\", line 245, in main\n    sanity_windows[str(W)] = preflight_windows(Nt=Nt, W_tau=W, stride=stride, strict=strict_sanity)\n                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ralf-kemmann/Downloads/worldsheet_polyakov_skeleton/code/worldsheet_polyakov/sanity_checks.py\", line 28, in preflight_windows\n    raise RuntimeError(\nRuntimeError: [sanity] DEGENERATE windows: max_overlap=0 (W_tau=24, stride=32). Fix: choose stride < W_tau."
+}

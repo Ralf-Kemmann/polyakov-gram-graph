@@ -1,0 +1,97 @@
+{
+  "run_id": "sweep_W32_S8",
+  "module": "worldsheet_polyakov",
+  "signature": "euclidean",
+  "gauge": "conformal",
+  "target_dim_D": 1,
+  "tension_T": 1.0,
+  "grid": {
+    "N_sigma": 64,
+    "N_tau": 256,
+    "delta_sigma": 1.0,
+    "delta_tau": 1.0,
+    "bc": {
+      "sigma_periodic": true,
+      "tau_periodic": false
+    }
+  },
+  "sampling": {
+    "method": "langevin",
+    "rng_seed": 123456,
+    "step_size_eta": 0.01,
+    "n_steps_total": 2000,
+    "burn_in_steps": 200,
+    "sample_every": 20,
+    "n_saved_samples": 20,
+    "zero_mode_handling": "global_mean_subtract_each_step",
+    "noise": {
+      "type": "gaussian",
+      "scale": 1.0
+    }
+  },
+  "states": {
+    "construction": "tau_window_patch",
+    "weights": {
+      "type": "flat",
+      "params": {}
+    },
+    "stride_s_tau": 8,
+    "W_tau_sweep": [
+      32
+    ],
+    "measure_factor": "DeltaSigma*DeltaTau",
+    "fairness": {
+      "use_S_delta_common_support": true,
+      "normalize_after_support_restriction": true
+    }
+  },
+  "kernel_K": {
+    "inner_product": "real",
+    "store_abs": true,
+    "epsilon_sweep": [
+      1e-08
+    ],
+    "normalize_diagonal_to_one": true
+  },
+  "distance_graph": {
+    "ell0": 1.0,
+    "distance_def": "d_ij = -ell0 * log(|K_ij| + eps)",
+    "graph_builder": "knn",
+    "knn_k_sweep": [
+      7
+    ],
+    "symmetrize": true,
+    "shortest_paths": {
+      "method": "dijkstra"
+    }
+  },
+  "dph": {
+    "x_def": "x = D(i,j)/ell0",
+    "y_def": "y = -log(|K_ij| + eps)",
+    "pairing": "all_pairs",
+    "macro_linearity_check": {
+      "enabled": true,
+      "require_common_scale_window_across_sweeps": true
+    },
+    "outputs": {
+      "plot_file": "dph_plot.png",
+      "summary_file": "sweeps_summary.json"
+    }
+  },
+  "io": {
+    "output_dir": "/home/ralf-kemmann/Downloads/worldsheet_polyakov_skeleton/outputs/worldsheet_polyakov/sweep_W32_S8",
+    "save_K_npy": true,
+    "save_params_json": true,
+    "append_project_log": "docs/project_log.md"
+  },
+  "assumptions": [
+    "Conformal gauge assumed.",
+    "Virasoro constraints not enforced in baseline run (embedding fields only).",
+    "Euclidean worldsheet for sampling stability; Minkowski/real-time is a later extension."
+  ],
+  "pragmatics": {
+    "reuse_K_if_exists": false,
+    "strict_sanity": true,
+    "K_informative_min": 0.0001
+  }
+}
